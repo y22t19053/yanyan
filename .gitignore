@@ -1,0 +1,29 @@
+# 报告与中间产物
+*.md.bak
+tests/out_*.md
+tests/empty.txt
+*.json.bak
+
+# 本地实验，不进仓库
+local/
+private/
+secrets/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# OS
+~$*
