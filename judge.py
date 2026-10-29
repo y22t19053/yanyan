@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 验言 · LLM 判官层（L2）
@@ -12,11 +12,12 @@
 没模型也能跑：--rule-only 直接输出 L1 判决。
 
 用法：
-    python judge.py examples/demo_chat.txt                      # 自动找本地 Ollama
-    python judge.py examples/demo_chat.txt --backend ollama --model qwen2.5:7b
-    python judge.py examples/demo_chat.txt --backend openai --base-url http://localhost:8000/v1
-    python judge.py examples/demo_chat.txt --rule-only           # 不用模型
-    python judge.py examples/demo_chat.txt --out report.md
+    python judge.py examples/mingli/demo_chat.txt                      # 自动找本地 Ollama
+    python judge.py examples/mingli/demo_chat.txt --backend ollama --model qwen2.5:7b
+    python judge.py examples/mingli/demo_chat.txt --backend openai --base-url http://localhost:8000/v1
+    python judge.py examples/mingli/demo_chat.txt --rule-only           # 不用模型
+    python judge.py examples/shazhupan/demo_chat.txt --track shazhupan --rule-only
+    python judge.py examples/mingli/demo_chat.txt --out report.md
 """
 
 import argparse
@@ -108,7 +109,9 @@ def call_openai(model, prompt, base_url="http://127.0.0.1:8000/v1", api_key=None
 
 # ---------------------------------------------------------------- 提示词
 
-PROMPT = """你是一个占卜话术质检员。判断这段对话里占卜师的话是**专业的**还是**在敷衍、操控、乱说**。
+# 内置兜底：rules/mingli/判官提示词.md 丢失时用。
+# 正常情况下提示词都在 rules/<track>/判官提示词.md 里维护（改提示词不用动代码）。
+DEFAULT_PROMPT = """你是一个占卜话术质检员。判断这段对话里占卜师的话是**专业的**还是**在敷衍、操控、乱说**。
 
 已有确定性扫描器的结果，可参考但**不要盲从**——它只看词，看不出语境。
 
@@ -135,44 +138,20 @@ PROMPT = """你是一个占卜话术质检员。判断这段对话里占卜师�
 2. <反问>
 3. <反问>
 
-## 三条反问的硬性要求（最容易写错）
-
-反问的目的是**把选择权拿回来**，不是骂回去，更**不是接受对方的前提**。
-
-- ✗ 错：「我需要提前准备什么材料吗？」——默认了仪式要做
-- ✗ 错：「有没有更便宜的方式？」——默认了要买，只是砍价
-- ✓ 对：「这个判断是从哪张牌、哪个盘上看出来的？」——要依据
-- ✓ 对：「如果我不做，你判断会发生什么？依据是什么？」——要可验证的后果
-- ✓ 对：「这件事我可以去问别人吗？如果不行，为什么？」——试探隔离
-
 每条反问必须是**疑问句**，必须让回答者**举证或暴露矛盾**。
-
-## 判断标准
-
-**你判的是对话本身，不是上面那份扫描结果。** 扫描器只看词、不看语境，它的分数可能偏高或偏低；如果你的判断和它冲突，**以你的判断为准**，并在总结里说明。
-
-- 含糊：这句话能不能套在任何一个求测者身上？能，就是含糊。
-- 落地：有没有具体时间、数字、可执行动作、可验证结果。
-- 恐吓-卖药：先制造灾难，再卖解法。**必须形成链条才算**；只吓人不卖药，降一级。
-- 依赖：让你觉得「离开他你就完了」，或让你别去问别人。
-- 牌义：占卜师讲的牌义是否与公认牌义冲突。
-
-**这些是专业的表现，不要判成问题：**
-- 「我不做改运 / 不做化解」——拒绝卖药，加分
-- 「牌只显示当下，不是结论，你可以改」——把选择权还给你，加分
-- 「这个判断只是牌面显示的当下状态」——同上，加分
-- 「一次问一个，我们慢慢来」——正常提问节奏，不是限制自由
-- 给了具体时间、具体动作、且不卖解法——专业，不是含糊
-
-**这些才是问题：**
-- 让你别去问别人、说「说了就不灵了」——隔离手法，最典型
-- 制造无法验证的灾难 + 紧跟收费解法——恐惧营销
-- 把猜测包装成断言（「你是不是…」「我一看就知道」）——冷读
-
-**注意**：`第8行` 这类行号要写**对话原文里的真实行号**，不是扫描结果里的序号。原文片段必须逐字照抄。
 
 若没识别出占卜师说了什么，如实说「数据不足」，不要编。
 """
+
+
+def load_prompt(track):
+    """判官提示词存在 rules/<track>/判官提示词.md，占两个格式化坑位：
+    {scan_summary} 和 {dialogue}。"""
+    p = os.path.join(HERE, "rules", track, "判官提示词.md")
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+    return DEFAULT_PROMPT
 
 
 def build_scan_summary(r):
@@ -274,6 +253,12 @@ def render_report(path, r, judged, backend_note):
     if r["money_mentioned"] and r["chain_state"] in ("恐惧营销", "操控性话术"):
         L.append("")
         L.append("> ⚠️ **出现金额或收款方式，且已构成恐吓-卖药链。** 建议保留完整记录。")
+    for it in r.get("identity_findings", []):
+        L.append("")
+        L.append(
+            f"> ⚠️ **身份矛盾：** 对方自称「{it['identity']}」（L{it['signal_line']}），"
+            f"却在 L{it['violation_line']} 谈「{it['violation_text']}」。{it.get('note', '')}"
+        )
     L.append("")
     if judged and judged.get("summary"):
         L.append(f"> {judged['summary']}")
@@ -320,29 +305,38 @@ def render_report(path, r, judged, backend_note):
             L.append(f"{i}. {q}")
         L.append("")
     else:
+        # 无模型时用赛道自带的三条反问顶上（track.json 的 fallback_questions）
+        tcfg = scanner.load_track(r.get("track", scanner.DEFAULT_TRACK))
+        fallback = tcfg.get("fallback_questions") or [
+            "你刚才说的这个判断，依据是什么？",
+            "如果我不照做，会发生什么？依据是什么？",
+            "这件事我可以去问别人吗？如果不行，为什么？",
+        ]
         L.append("## 你可以这样问回去")
         L.append("")
-        L.append("1. 你刚才说我「身上有问题」，请问这个判断是从哪张牌、哪个盘上看出来的？")
-        L.append("2. 如果我不做你说的这个处理，你判断会发生什么？依据是什么？")
-        L.append("3. 这件事我可以去问别人吗？如果不行，为什么？")
+        for i, q in enumerate(fallback[:3], 1):
+            L.append(f"{i}. {q}")
         L.append("")
 
     L.append("---")
     L.append("")
     L.append(f"*后端：{backend_note}*")
     L.append("")
-    L.append("*免责：本工具评估的是**话术结构**，不评估占卜是否灵验，也不构成对任何人的指控。*")
+    L.append("*免责：本工具评估的是**话术结构**，不评判占卜是否灵验或投资是否赚钱，也不构成对任何人的指控。*")
     return "\n".join(L)
 
 
 def main():
-    ap = argparse.ArgumentParser(description="验言 · 占卜话术质检")
+    tracks = scanner.available_tracks()
+    ap = argparse.ArgumentParser(description="验言 · 话术质检（规则层 + LLM 判官）")
     ap.add_argument("file")
+    ap.add_argument("--track", default=scanner.DEFAULT_TRACK, choices=tracks,
+                    help=f"话术赛道（默认 {scanner.DEFAULT_TRACK}）")
     ap.add_argument("--backend", choices=["auto", "ollama", "openai", "none"], default="auto")
     ap.add_argument("--model", default=None)
     ap.add_argument("--base-url", default=None)
     ap.add_argument("--api-key", default=os.environ.get("YANYAN_API_KEY"))
-    ap.add_argument("--cards", default=None, help="牌面，逗号分隔")
+    ap.add_argument("--cards", default=None, help="牌面，逗号分隔（mingli 赛道）")
     ap.add_argument("--out", default=None, help="输出 Markdown 报告")
     ap.add_argument("--rule-only", action="store_true", help="不用模型，只出 L1 结果")
     ap.add_argument("--json", default=None)
@@ -355,7 +349,7 @@ def main():
     text = scanner.read_text(args.file)
 
     cards = [c for c in (args.cards or "").split(",") if c.strip()]
-    r = scanner.scan(text, cards=cards)
+    r = scanner.scan(text, cards=cards, track=args.track)
     r["file"] = args.file
 
     # ---- 选后端 ----
@@ -382,7 +376,7 @@ def main():
 
     judged = None
     if backend != "none":
-        prompt = PROMPT.format(scan_summary=build_scan_summary(r), dialogue=text[:6000])
+        prompt = load_prompt(args.track).format(scan_summary=build_scan_summary(r), dialogue=text[:6000])
         try:
             if backend == "ollama":
                 raw = call_ollama(model, prompt, args.base_url or "http://127.0.0.1:11434")

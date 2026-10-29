@@ -1,20 +1,25 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 验言 · 确定性扫描层（L1）
 
-零依赖，只用标准库。输入一段占卜对话，输出结构化 JSON：
-  - 逐句分角色（占卜师 / 求测者 / 未知）
+零依赖，只用标准库。输入一段对话，输出结构化 JSON：
+  - 逐句分角色（按赛道：占卜师/求测者，或 骗子/受害者）
   - 六维里可以纯规则判定的部分：含糊度、落地度、吓唬-卖药、依赖度、复读机
   - 每一处命中都带行号与原文，供报告引用
 
 不做的事：不调用任何模型，不评估「牌对不对」（那需要牌面数据），不下最终判决。
 最终判决由 judge.py（L2）或 --rule-only 模式给出。
 
+赛道（rules/ 下每个子目录一个，改词表不用动代码）：
+    mingli     占卜话术（默认，向后兼容 v0.1）
+    shazhupan  杀猪盘/投资理财收割话术
+
 用法：
-    python scan.py examples/demo_chat.txt
-    python scan.py examples/demo_chat.txt --json out.json
-    python scan.py examples/demo_chat.txt --cards "愚者,塔,月亮"
+    python scan.py examples/mingli/demo_chat.txt
+    python scan.py examples/shazhupan/demo_chat.txt --track shazhupan
+    python scan.py examples/mingli/demo_chat.txt --json out.json
+    python scan.py examples/mingli/demo_chat.txt --cards "愚者,塔,月亮"
 """
 
 import argparse
@@ -33,6 +38,59 @@ if hasattr(sys.stdout, "reconfigure"):
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RULES_DIR = os.path.join(HERE, "rules")
+DEFAULT_TRACK = "mingli"
+
+# ---------------------------------------------------------------- 赛道
+
+# 一个赛道 = rules/<name>/ 目录，里面必须有 track.json：
+#   reader_aliases / client_aliases  说话人识别词表
+#   special_check                    第六维（牌对不对 / 身份对不对）
+#   fallback_questions               无模型时的三条反问
+_TRACK_CACHE = {}
+
+
+def available_tracks():
+    out = []
+    if os.path.isdir(RULES_DIR):
+        for name in sorted(os.listdir(RULES_DIR)):
+            if os.path.isfile(os.path.join(RULES_DIR, name, "track.json")):
+                out.append(name)
+    return out
+
+
+def build_speaker_patterns(cfg):
+    """从 track.json 的别名表构建说话人识别正则。
+
+    长别名排前：正则交替是先到先得，把「算命先生」排在「先生」后面
+    就永远轮不到它（两者都在行首时被短的抢先）。
+    """
+    def alt(words):
+        words = sorted(set(words), key=len, reverse=True)
+        return "|".join(re.escape(w) for w in words)
+
+    prefix = r"^\s*(?:[\d\-/:.\s]{0,20})?"
+    return [
+        (prefix + "(?:" + alt(cfg["reader_aliases"]) + r")\s*[：:]\s*(.*)$", "reader"),
+        (prefix + "(?:" + alt(cfg["client_aliases"]) + r")\s*[：:]\s*(.*)$", "client"),
+    ]
+
+
+def load_track(name):
+    """加载赛道配置（含说话人正则），带缓存。未知赛道直接退出并列出可用项。"""
+    if name in _TRACK_CACHE:
+        return _TRACK_CACHE[name]
+    path = os.path.join(RULES_DIR, name, "track.json")
+    if not os.path.exists(path):
+        raise SystemExit(
+            f"未知赛道：{name}（找不到 {path}）。可用：{'、'.join(available_tracks())}"
+        )
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    cfg.setdefault("name", name)
+    cfg["dir"] = os.path.dirname(path)
+    cfg["speaker_patterns"] = build_speaker_patterns(cfg)
+    _TRACK_CACHE[name] = cfg
+    return cfg
 
 # ---------------------------------------------------------------- 词表加载
 
@@ -109,27 +167,24 @@ def read_text(path):
 
 # ---------------------------------------------------------------- 对话解析
 
-# 支持形如：
+# 默认用 mingli 赛道的说话人词表（v0.1 兼容）：
 #   我：xxx        占卜师：xxx       师傅：xxx
 #   求测者：xxx     客户：xxx         A：xxx  B：xxx
 #   2026-10-27 21:03 我：xxx
-SPEAKER_PATTERNS = [
-    (r"^\s*(?:[\d\-/:.\s]{0,20})?(?:占卜师|师傅|老师|先生|大师|算命先生|命理师|塔罗师)\s*[：:]\s*(.*)$", "reader"),
-    (r"^\s*(?:[\d\-/:.\s]{0,20})?(?:我|求测者|客户|问卜者|用户|来访者|案主)\s*[：:]\s*(.*)$", "client"),
-    (r"^\s*(?:[\d\-/:.\s]{0,20})?(?:A|甲)\s*[：:]\s*(.*)$", "reader"),
-    (r"^\s*(?:[\d\-/:.\s]{0,20})?(?:B|乙)\s*[：:]\s*(.*)$", "client"),
-]
+# 其他赛道（骗子/对方/网友/客服/导师……）由 track.json 提供，见 load_track()。
 
 
-def parse_dialogue(text):
+def parse_dialogue(text, patterns=None):
     """把原文切成 [{line, speaker, text}]，speaker in {reader, client, unknown}"""
+    if patterns is None:
+        patterns = load_track(DEFAULT_TRACK)["speaker_patterns"]
     out = []
     for i, raw in enumerate(text.splitlines(), start=1):
         line = raw.strip()
         if not line:
             continue
         speaker, body = "unknown", line
-        for pat, who in SPEAKER_PATTERNS:
+        for pat, who in patterns:
             m = re.match(pat, line)
             if m:
                 speaker, body = who, m.group(1).strip()
@@ -170,10 +225,12 @@ ACTION_ANCHOR = re.compile(
     r"把.{1,8}(?:说开|写下来|列出来|问清楚)|先别|暂时不|缓一缓|"
     r"试一次|做一次|做一件事|打个电话|找.{1,6}聊|投.{1,4}简历)"
 )
-# 金额 / 收款：必须同时认中文数字，否则「一千八百块」这种最典型的报价会漏掉
+# 金额 / 收款：必须同时认中文数字，否则「一千八百块」这种最典型的报价会漏掉。
+# v0.2 起加充值/提现/保证金/解冻金：杀猪盘的收款词和占卜不一样，但都算钱。
 MONEY = re.compile(
     r"(\d+\s*(?:元|块|万)|" + CN_NUM + r"\s*(?:元|块|万)|"
-    r"转账|收款|打款|红包|付款|微信支付|支付宝|扫码|定金|尾款)"
+    r"转账|收款|打款|红包|付款|微信支付|支付宝|扫码|定金|尾款|"
+    r"充值|提现|入金|保证金|解冻金|激活费)"
 )
 # 正确废话（看着像建议，实际无法执行）
 EMPTY_ADVICE = re.compile(r"(注意沟通|保持平衡|放平心态|顺其自然|相信自己|多沟通|调整心态|保持耐心|静观其变)")
@@ -209,9 +266,12 @@ def has_anchor(sentence):
 # ---------------------------------------------------------------- 主扫描
 
 
-def scan(text, cards=None):
-    lexicon = load_lexicon(os.path.join(RULES_DIR, "巴纳姆词表.md"))
-    chain = load_chain_lexicon(os.path.join(RULES_DIR, "恐吓-解药链.md"))
+def scan(text, cards=None, track=DEFAULT_TRACK):
+    tcfg = load_track(track)
+    tdir = tcfg["dir"]
+    special = tcfg.get("special_check") or {}
+    lexicon = load_lexicon(os.path.join(tdir, "巴纳姆词表.md"))
+    chain = load_chain_lexicon(os.path.join(tdir, "恐吓-解药链.md"))
 
     # 反巴纳姆的 C 组（钓鱼句）单独拎出来，权重不同
     barnum = lexicon.get("A", []) + lexicon.get("B", [])
@@ -219,7 +279,7 @@ def scan(text, cards=None):
     vague_time = lexicon.get("E", [])
     circular = lexicon.get("D", [])
 
-    entries = parse_dialogue(text)
+    entries = parse_dialogue(text, tcfg["speaker_patterns"])
     sentences = []
     for e in entries:
         sentences.extend(split_sentences(e))
@@ -337,11 +397,13 @@ def scan(text, cards=None):
     rep -= 25 * echo
     dims["复读机"] = max(0, rep)
 
-    # 5. 牌对不对：需要牌面数据，规则层只做「编造牌义」的粗筛
-    dims["牌对不对"] = None
+    # 5. 第六维（赛道专属）：占卜是「牌对不对」，杀猪盘是「身份对不对」
+    dim6 = special.get("dim_name", "牌对不对")
+    dims[dim6] = None
     card_findings = []
-    if cards:
-        base_path = os.path.join(RULES_DIR, "牌义基准.json")
+    identity_findings = []
+    if special.get("kind") == "cards" and cards:
+        base_path = os.path.join(tdir, special.get("base", "牌义基准.json"))
         if os.path.exists(base_path):
             with open(base_path, encoding="utf-8") as f:
                 base = json.load(f)
@@ -357,7 +419,31 @@ def scan(text, cards=None):
                                 {"line": s["line"], "card": name, "word": misuse, "text": s["text"]}
                             )
             if card_findings:
-                dims["牌对不对"] = max(0, 100 - 30 * len(card_findings))
+                dims[dim6] = max(0, 100 - 30 * len(card_findings))
+    elif special.get("kind") == "identity":
+        # 身份矛盾：自称 X，却在谈 X 绝不可能谈的事。
+        # 军人不网上带人投资，交易所内部人员不拉散户，公检法不电话要验证码。
+        # 信号和违禁词可以在不同行——骗子先立人设、后图穷匕见，隔着几十行也照样是矛盾。
+        base_path = os.path.join(tdir, special.get("base", "身份基准.json"))
+        if os.path.exists(base_path):
+            with open(base_path, encoding="utf-8") as f:
+                base = json.load(f)
+            for ident in base.get("identities", []):
+                sig_hits = [s for s in target if any(w in s["text"] for w in ident.get("signals", []))]
+                bad_hits = [s for s in target if any(w in s["text"] for w in ident.get("forbidden", []))]
+                if sig_hits and bad_hits:
+                    identity_findings.append(
+                        {
+                            "identity": ident.get("name", "?"),
+                            "note": ident.get("note", ""),
+                            "signal_line": sig_hits[0]["line"],
+                            "signal_text": sig_hits[0]["text"][:60],
+                            "violation_line": bad_hits[0]["line"],
+                            "violation_text": bad_hits[0]["text"][:60],
+                        }
+                    )
+        # 无矛盾 = 100（身份自洽）；有矛盾按处扣分
+        dims[dim6] = max(0, 100 - 40 * len(identity_findings)) if identity_findings else 100
 
     scored = [v for v in dims.values() if v is not None]
     average = round(sum(scored) / len(scored)) if scored else None
@@ -370,6 +456,10 @@ def scan(text, cards=None):
         average = None
 
     return {
+        "track": tcfg["name"],
+        "track_title": tcfg.get("title", ""),
+        "reader_label": tcfg.get("reader_label", "对方"),
+        "client_label": tcfg.get("client_label", "我"),
         "source_chars": len(text),
         "sentences_total": len(sentences),
         "claims_evaluated": total_claims,
@@ -381,6 +471,7 @@ def scan(text, cards=None):
         "hits": hits,
         "anchors": anchors,
         "card_findings": card_findings,
+        "identity_findings": identity_findings,
     }
 
 
@@ -398,13 +489,16 @@ def bar(score):
 
 def print_report(r, path):
     print("=" * 62)
-    print("验言 · 确定性扫描报告（L1）")
+    print(f"验言 · 确定性扫描报告（L1）｜赛道：{r.get('track_title') or r.get('track', 'mingli')}")
     print("=" * 62)
     print(f"文件      {path}")
     print(f"字数      {r['source_chars']}")
     print(f"句子      {r['sentences_total']} 句，其中评估 {r['claims_evaluated']} 句")
     if not r["role_detected"]:
-        print("⚠ 未识别出说话人角色，已按全量评估。用「占卜师：」「我：」开头可提高准确率。")
+        print(
+            f"⚠ 未识别出说话人角色，已按全量评估。"
+            f"用「{r.get('reader_label', '对方')}：」「{r.get('client_label', '我')}：」开头可提高准确率。"
+        )
     print()
     print("六维（越高越健康，n/a = 缺数据不猜）")
     for k, v in r["dimensions"].items():
@@ -437,16 +531,28 @@ def print_report(r, path):
             print(f"  L{it['line']:<4} {it['card']} + 「{it['word']}」")
         print()
 
+    if r.get("identity_findings"):
+        print(f"【身份矛盾】{len(r['identity_findings'])} 处")
+        for it in r["identity_findings"][:6]:
+            print(
+                f"  自称{it['identity']}（L{it['signal_line']}），却在 "
+                f"L{it['violation_line']} 谈「{it['violation_text']}」"
+            )
+        print()
+
     print("-" * 62)
-    print("下一步：python judge.py <文件>   交给 LLM 判官出判决与三条反问")
-    print("免责：本报告评估话术结构，不评估占卜是否灵验。")
+    print(f"下一步：python judge.py <文件> --track {r.get('track', 'mingli')}   交给 LLM 判官出判决与三条反问")
+    print("免责：本报告评估话术结构，不评判占卜是否灵验或投资是否赚钱，也不构成对任何人的指控。")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="验言 · 占卜对话确定性扫描")
+    tracks = available_tracks()
+    ap = argparse.ArgumentParser(description="验言 · 话术解剖器（确定性扫描）")
     ap.add_argument("file", help="对话文本文件（UTF-8）")
+    ap.add_argument("--track", default=DEFAULT_TRACK, choices=tracks,
+                    help=f"话术赛道（默认 {DEFAULT_TRACK}，向后兼容 v0.1）")
     ap.add_argument("--json", help="把完整结果写入 JSON 文件")
-    ap.add_argument("--cards", help="牌面，逗号分隔，如：愚者,塔,月亮")
+    ap.add_argument("--cards", help="牌面，逗号分隔，如：愚者,塔,月亮（mingli 赛道）")
     ap.add_argument("--quiet", action="store_true", help="不打印报告")
     args = ap.parse_args()
 
@@ -457,7 +563,7 @@ def main():
     text = read_text(args.file)
 
     cards = [c for c in (args.cards or "").split(",") if c.strip()]
-    result = scan(text, cards=cards)
+    result = scan(text, cards=cards, track=args.track)
     result["file"] = args.file
 
     if args.json:

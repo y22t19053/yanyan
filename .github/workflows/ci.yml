@@ -22,11 +22,25 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Smoke run on demo
-        run: python scan.py examples/demo_chat.txt
+      - name: Smoke run on mingli demo
+        run: python scan.py examples/mingli/demo_chat.txt
 
-      - name: Smoke run on clean control
-        run: python scan.py gold/clean_chat.txt
+      - name: Smoke run on mingli clean control
+        run: python scan.py gold/mingli/clean_chat.txt
+
+      - name: Smoke run on shazhupan demo (identity check)
+        run: python scan.py examples/shazhupan/demo_chat.txt --track shazhupan
+
+      - name: Smoke run on shazhupan clean control
+        run: python scan.py gold/shazhupan/clean_chat.txt --track shazhupan
+
+      - name: Unknown track must fail
+        run: |
+          set +e
+          python scan.py examples/mingli/demo_chat.txt --track nope
+          code=$?
+          set -e
+          test $code -ne 0
 
       - name: Regression tests
         run: python tests/test_scan.py

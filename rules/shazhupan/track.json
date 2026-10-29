@@ -1,0 +1,20 @@
+{
+  "name": "shazhupan",
+  "title": "杀猪盘话术",
+  "description": "投资理财类情感诈骗（杀猪盘）、网赌收割。判对方是否在做人设包装、诱导充值、连环收割。",
+  "reader_aliases": ["骗子", "对方", "网友", "业务员", "客服", "导师", "A", "甲"],
+  "client_aliases": ["我", "受害者", "本人", "B", "乙"],
+  "reader_label": "对方",
+  "client_label": "我",
+  "special_check": {
+    "kind": "identity",
+    "base": "身份基准.json",
+    "dim_name": "身份对不对",
+    "needs_input": false
+  },
+  "fallback_questions": [
+    "你说的这个平台叫什么名字？它的金融牌照在哪里可以查到？",
+    "为什么提现要我先交钱？哪家正规平台是这样规定的？",
+    "你说你在部队/交易所上班，可以开个视频让我看一眼证件和工作环境吗？"
+  ]
+}
